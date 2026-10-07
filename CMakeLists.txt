@@ -23,6 +23,7 @@ add_library(imgborders SHARED
 	ImgBorder.cpp
 	ImgBorderPassElement.cpp
 	ImgUtils.cpp
+	Log.cpp
 )
 
 pkg_check_modules(deps REQUIRED IMPORTED_TARGET

@@ -1,8 +1,14 @@
 #include "globals.hpp"
+#include "ImgBorder.hpp"
 #include "ImgUtils.hpp"
+#include "Log.hpp"
+#include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -40,13 +46,7 @@ static void parseGaps(const std::string &v, int out[4]) {
   }
 }
 
-void imgbordersLoadSettings(SImgBorderSettings &out) {
-  const char *home = std::getenv("HOME");
-  if (!home)
-    return;
-
-  const std::string path =
-      std::string(home) + "/.config/hypr/imgborders.conf";
+static void loadFile(const std::string &path, SImgBorderSettings &out) {
   std::ifstream in(path);
   if (!in)
     return;
@@ -73,6 +73,10 @@ void imgbordersLoadSettings(SImgBorderSettings &out) {
         parseGaps(val, out.sizes);
       else if (key == "insets")
         parseGaps(val, out.insets);
+      else if (key == "centers")
+        parseGaps(val, out.centers);
+      else if (key == "flanks")
+        parseGaps(val, out.flanks);
       else if (key == "scale")
         out.scale = std::stof(val);
       else if (key == "smooth")
@@ -84,6 +88,13 @@ void imgbordersLoadSettings(SImgBorderSettings &out) {
   }
 }
 
+void imgbordersLoadSettings(SImgBorderSettings &out) {
+  loadFile("/usr/share/neuronix/imgborders/imgborders.conf", out);
+  const char *home = std::getenv("HOME");
+  if (home)
+    loadFile(std::string(home) + "/.config/hypr/imgborders.conf", out);
+}
+
 void imgbordersEnsureTextures() {
   if (!g_pGlobalState)
     return;
@@ -91,24 +102,51 @@ void imgbordersEnsureTextures() {
   if (tex.ready || tex.failed)
     return;
 
-  const auto &s = g_pGlobalState->settings;
+  ImgLog::stage("ensureTextures");
+  auto &s = g_pGlobalState->settings;
   if (s.imagePath[0] == '\0' || !std::filesystem::exists(s.imagePath)) {
+    const char *home = std::getenv("HOME");
+    const char *fallbacks[3] = {
+        "/usr/share/neuronix/imgborders/example.png",
+        nullptr,
+        nullptr,
+    };
+    static char localShare[512];
+    if (home) {
+      std::snprintf(localShare, sizeof(localShare),
+                    "%s/.local/share/neuronix/imgborders/example.png", home);
+      fallbacks[1] = localShare;
+    }
+    for (const char *fb : fallbacks) {
+      if (fb && std::filesystem::exists(fb)) {
+        std::snprintf(s.imagePath, sizeof(s.imagePath), "%s", fb);
+        break;
+      }
+    }
+  }
+  if (s.imagePath[0] == '\0' || !std::filesystem::exists(s.imagePath)) {
+    ImgLog::log("ERROR no image path / missing file");
     tex.failed = true;
     return;
   }
 
   for (int i = 0; i < 4; i++) {
-    if (s.sizes[i] < 0) {
+    if (s.sizes[i] < 0 || s.centers[i] < 0 || s.flanks[i] < 0) {
+      ImgLog::log("ERROR negative sizes/centers/flanks");
       tex.failed = true;
       return;
     }
   }
 
+  ImgLog::log("loading %s", s.imagePath);
+  ImgLog::stage("loadPNG");
   auto src = ImgUtils::load(s.imagePath);
   if (!src) {
+    ImgLog::log("ERROR ImgUtils::load returned null");
     tex.failed = true;
     return;
   }
+  ImgLog::log("png size=%.0fx%.0f", src->m_size.x, src->m_size.y);
 
   const float L = (float)s.sizes[0];
   const float R = (float)s.sizes[1];
@@ -117,18 +155,157 @@ void imgbordersEnsureTextures() {
   const float WM = src->m_size.x - L - R;
   const float HM = src->m_size.y - T - B;
   if (WM <= 0 || HM <= 0) {
+    ImgLog::log("ERROR mid strip invalid WM=%.1f HM=%.1f (sizes too large?)",
+                WM, HM);
     tex.failed = true;
     return;
   }
 
+  // Mid strip: [FLANK][TILE][CENTER][FLANK]. flanks=0 keeps the 13-patch.
+  struct Split {
+    float flankA, tile, center, flankB;
+  };
+  auto split = [](float mid, int centerWant, int flankWant) -> Split {
+    float flank = std::clamp((float)flankWant, 0.f, mid * 0.5f);
+    float center = std::clamp((float)centerWant, 0.f, mid - 2.f * flank);
+    float tile = mid - 2.f * flank - center;
+    if (tile < 0.f)
+      tile = 0.f;
+    return {flank, tile, center, flank};
+  };
+
+  const auto top = split(WM, s.centers[0], s.flanks[0]);
+  const auto right = split(HM, s.centers[1], s.flanks[1]);
+  const auto bottom = split(WM, s.centers[2], s.flanks[2]);
+  const auto left = split(HM, s.centers[3], s.flanks[3]);
+  const float Wt = top.tile, Wc = top.center, FtL = top.flankA, FtR = top.flankB;
+  const float HbR = right.tile, HcR = right.center, FrT = right.flankA, FrB = right.flankB;
+  const float Wb = bottom.tile, Bc = bottom.center, FbL = bottom.flankA, FbR = bottom.flankB;
+  const float Ht = left.tile, HcL = left.center, FlT = left.flankA, FlB = left.flankB;
+  ImgLog::log("21-patch mid=%.0fx%.0f flank/tile/center T=%.0f/%.0f/%.0f "
+              "R=%.0f/%.0f/%.0f B=%.0f/%.0f/%.0f L=%.0f/%.0f/%.0f",
+              WM, HM, FtL, Wt, Wc, FrT, HbR, HcR, FbL, Wb, Bc, FlT, Ht, HcL);
+
+  ImgLog::stage("slice.corners");
   tex.tl = ImgUtils::sliceTexture(src, {{0., 0.}, {L, T}});
-  tex.t = ImgUtils::sliceTexture(src, {{L, 0.}, {WM, T}});
   tex.tr = ImgUtils::sliceTexture(src, {{src->m_size.x - R, 0.}, {R, T}});
-  tex.r = ImgUtils::sliceTexture(src, {{src->m_size.x - R, T}, {R, HM}});
-  tex.br =
-      ImgUtils::sliceTexture(src, {{src->m_size.x - R, src->m_size.y - B}, {R, B}});
-  tex.b = ImgUtils::sliceTexture(src, {{L, src->m_size.y - B}, {WM, B}});
+  tex.br = ImgUtils::sliceTexture(
+      src, {{src->m_size.x - R, src->m_size.y - B}, {R, B}});
   tex.bl = ImgUtils::sliceTexture(src, {{0., src->m_size.y - B}, {L, B}});
-  tex.l = ImgUtils::sliceTexture(src, {{0., T}, {L, HM}});
+
+  ImgLog::stage("slice.edges");
+  auto sliceOrNull = [&](float x, float y, float w, float h) -> SP<ITexture> {
+    if (w <= 0.f || h <= 0.f)
+      return nullptr;
+    return ImgUtils::sliceTexture(src, {{x, y}, {w, h}});
+  };
+
+  // Top: [flank by TL][tile][center][flank by TR]
+  tex.tfl = sliceOrNull(L, 0., FtL, T);
+  tex.t = sliceOrNull(L + FtL, 0., Wt, T);
+  tex.tc = sliceOrNull(L + FtL + Wt, 0., Wc, T);
+  tex.tfr = sliceOrNull(L + FtL + Wt + Wc, 0., FtR, T);
+
+  // Bottom
+  const float by = src->m_size.y - B;
+  tex.bfl = sliceOrNull(L, by, FbL, B);
+  tex.b = sliceOrNull(L + FbL, by, Wb, B);
+  tex.bc = sliceOrNull(L + FbL + Wb, by, Bc, B);
+  tex.bfr = sliceOrNull(L + FbL + Wb + Bc, by, FbR, B);
+
+  // Left: [flank by TL][tile][center][flank by BL]
+  tex.lft = sliceOrNull(0., T, L, FlT);
+  tex.l = sliceOrNull(0., T + FlT, L, Ht);
+  tex.lc = sliceOrNull(0., T + FlT + Ht, L, HcL);
+  tex.lfb = sliceOrNull(0., T + FlT + Ht + HcL, L, FlB);
+
+  // Right
+  const float rx = src->m_size.x - R;
+  tex.rft = sliceOrNull(rx, T, R, FrT);
+  tex.r = sliceOrNull(rx, T + FrT, R, HbR);
+  tex.rc = sliceOrNull(rx, T + FrT + HbR, R, HcR);
+  tex.rfb = sliceOrNull(rx, T + FrT + HbR + HcR, R, FrB);
+
   tex.ready = true;
+  ImgLog::stage("ensureTextures.done");
+  ImgLog::log("textures ready tl=%d tr=%d br=%d bl=%d t=%d tc=%d r=%d rc=%d "
+              "b=%d bc=%d l=%d lc=%d",
+              tex.tl ? 1 : 0, tex.tr ? 1 : 0, tex.br ? 1 : 0, tex.bl ? 1 : 0,
+              tex.t ? 1 : 0, tex.tc ? 1 : 0, tex.r ? 1 : 0, tex.rc ? 1 : 0,
+              tex.b ? 1 : 0, tex.bc ? 1 : 0, tex.l ? 1 : 0, tex.lc ? 1 : 0);
+}
+
+static void clearTextures(SGlobalTextures &tex) {
+  tex.ready = false;
+  tex.failed = false;
+  tex.tl = tex.tr = tex.br = tex.bl = nullptr;
+  tex.tfl = tex.tfr = tex.bfl = tex.bfr = nullptr;
+  tex.lft = tex.lfb = tex.rft = tex.rfb = nullptr;
+  tex.t = tex.tc = nullptr;
+  tex.r = tex.rc = nullptr;
+  tex.b = tex.bc = nullptr;
+  tex.l = tex.lc = nullptr;
+}
+
+void imgbordersReload() {
+  if (!g_pGlobalState)
+    return;
+
+  ImgLog::stage("reload");
+  clearTextures(g_pGlobalState->textures);
+
+  g_pGlobalState->settings = SImgBorderSettings{};
+  imgbordersLoadSettings(g_pGlobalState->settings);
+  ImgLog::log("reload image=%s centers=%d,%d,%d,%d",
+              g_pGlobalState->settings.imagePath,
+              g_pGlobalState->settings.centers[0],
+              g_pGlobalState->settings.centers[1],
+              g_pGlobalState->settings.centers[2],
+              g_pGlobalState->settings.centers[3]);
+
+  try {
+    imgbordersEnsureTextures();
+  } catch (const std::exception &e) {
+    ImgLog::log("ERROR ensureTextures: %s", e.what());
+    g_pGlobalState->textures.failed = true;
+    return;
+  } catch (...) {
+    ImgLog::log("ERROR ensureTextures unknown");
+    g_pGlobalState->textures.failed = true;
+    return;
+  }
+
+  if (!g_pCompositor || !g_pGlobalState->textures.ready) {
+    ImgLog::log("reload: textures not ready (failed=%d)",
+                g_pGlobalState->textures.failed ? 1 : 0);
+    return;
+  }
+
+  if (!g_pEventLoopManager)
+    return;
+  ImgLog::stage("reload.applyLater");
+  g_pEventLoopManager->doLater([]() {
+    ImgLog::stage("reload.apply");
+    if (!g_pCompositor || !g_pGlobalState)
+      return;
+    int n = 0;
+    try {
+      for (auto &w : g_pCompositor->m_windows) {
+        if (!w || !w->m_isMapped || w->isHidden())
+          continue;
+        for (auto &d : w->m_windowDecorations) {
+          if (!d || d->getDisplayName() != DISPLAY_NAME)
+            continue;
+          static_cast<CImgBorder *>(d.get())->applySettings();
+          n++;
+        }
+      }
+    } catch (const std::exception &e) {
+      ImgLog::log("ERROR reload.apply: %s", e.what());
+    } catch (...) {
+      ImgLog::log("ERROR reload.apply unknown");
+    }
+    ImgLog::log("reload applied to %d decorations", n);
+    ImgLog::stage("idle");
+  });
 }

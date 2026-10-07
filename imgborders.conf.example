@@ -1,8 +1,13 @@
-# Copy to ~/.config/hypr/imgborders.conf
-# Do NOT put these in hyprland.conf — Hyprland config values crash after hyprbars reloads.
+# System defaults. ~/.config/hypr/imgborders.conf overrides these.
+# Do NOT put these keys in hyprland.conf — Hyprland plugin values crash after hyprbars reloads.
 
-image = /home/khinds/Projects/LinuxOS/ImageBorders/example.png
+image = /usr/share/neuronix/imgborders/example.png
 sizes = 5,5,5,5
+# flanks = top, right, bottom, left (PNG px). Extra slice on each side of every corner.
+# 0 = 13-patch (no corner-side images).
+flanks = 0,0,0,0
+# centers = topW, rightH, bottomW, leftH (PNG px). 0 = classic 9-slice.
+centers = 0,0,0,0
 insets = 1,1,1,1
 scale = 1
 smooth = true

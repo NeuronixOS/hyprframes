@@ -10,20 +10,32 @@ using namespace Render;
 inline HANDLE PHANDLE = nullptr;
 
 // Plain POD + path buffer. No Hyprland Config::Values (they die on hyprbars reload).
-// imagePath is a fixed buffer so we never copy a heap std::string on the draw path
-// (that aborted Hyprland — crash reports 1379 / 2914).
 struct SImgBorderSettings {
-  char imagePath[512] =
-      "/home/khinds/Projects/LinuxOS/ImageBorders/example.png";
-  int sizes[4] = {5, 5, 5, 5};   // L R T B
-  int insets[4] = {1, 1, 1, 1}; // L R T B
+  char imagePath[512] = "/usr/share/neuronix/imgborders/example.png";
+  int sizes[4] = {5, 5, 5, 5};     // L R T B — corner / edge thickness in PNG px
+  int insets[4] = {1, 1, 1, 1};   // L R T B
+  // Center sample on each edge. 0 = no center (9-slice).
+  // Order: top width, right height, bottom width, left height (PNG px).
+  int centers[4] = {0, 0, 0, 0};
+  // Fixed slice on each side of every corner, along the edge (21-patch).
+  // Order matches centers. 0 = no corner-side slices (13-patch).
+  int flanks[4] = {0, 0, 0, 0};
   float scale = 1.f;
   bool smooth = true;
   bool blur = false;
 };
 
 struct SGlobalTextures {
-  SP<ITexture> tl, tr, br, bl, t, r, b, l;
+  // Corners
+  SP<ITexture> tl, tr, br, bl;
+  // One fixed slice on each side of each corner (drawn once).
+  // Top/bottom: left then right. Left/right edges: top then bottom.
+  SP<ITexture> tfl, tfr, bfl, bfr, lft, lfb, rft, rfb;
+  // Edge tiles + centers (both repeat between the corner-side slices)
+  SP<ITexture> t, tc;
+  SP<ITexture> r, rc;
+  SP<ITexture> b, bc;
+  SP<ITexture> l, lc;
   bool ready = false;
   bool failed = false;
 };
@@ -34,8 +46,8 @@ struct SGlobalState {
   uint32_t noImgBordersRuleIdx = 0;
 };
 
-// Defined in Settings.cpp — one object, not an inline header variable.
 extern UP<SGlobalState> g_pGlobalState;
 
 void imgbordersLoadSettings(SImgBorderSettings &out);
 void imgbordersEnsureTextures();
+void imgbordersReload();

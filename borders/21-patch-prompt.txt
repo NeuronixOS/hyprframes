@@ -1,0 +1,25 @@
+Use the first image only to see where each piece goes. Use the second image only for the look of the window border. Output one 480 by 480 PNG.
+
+No text. No letters. No numbers. No words. No labels. The output is a picture of a frame, not a diagram. Do not write FL, TILE, CTR, TL, TR, BL, BR, or any other marking. Do not copy the words or the paragraph printed in the middle of the first image. If a piece of the frame would have contained a letter, paint wood, metal, or the border material there instead.
+
+No grid lines. No seams. No gutters. No black strokes. No boxes around the pieces. The squares and lines in the first image are invisible guides. They must not appear in the output. Neighboring pieces of the frame touch and the material continues across the join with nothing drawn on it.
+
+Paint a single picture frame on a solid black background. The frame thickness is 80 pixels on every side, corners included. The hole inside the frame is one black rectangle from 80,80 to 400,400. Nothing sits inside that hole: no second frame, no extra corner, no extra plaque.
+
+The frame is made of 20 pieces. Each piece is 80 by 80 and is completely full of border artwork. A corner is an 80 by 80 block, the same width as the edge beside it. An edge piece is also 80 pixels thick. Do not draw a thin frame inside a larger piece. Do not leave black inside a piece.
+
+Corners and edges line up as one rectangle. The outside of every piece, corners included, is the outside of the image. The inside of every piece is the same line, exactly 80 pixels in. Where a corner meets an edge, the join is straight: no step, no overlap, no gap, and no second frame set beside the first. The inner face of a corner is flush with the inner face of the edges.
+
+The pieces touch and the material is continuous. Nothing is drawn on the join. The hole is empty solid black. Do not copy the first image's legend, letters, or colored squares into the hole or onto the frame.
+
+Where each piece goes:
+
+Top edge, left to right, each 80 by 80: top-left corner, the piece just right of that corner, a short top-edge sample, the middle of the top edge, the piece just left of the top-right corner, top-right corner.
+
+Right edge, top to bottom, under the top-right corner: the piece just below that corner, a short right-edge sample, the middle of the right edge, the piece just above the bottom-right corner.
+
+Bottom edge, left to right: bottom-left corner, the piece just right of that corner, a short bottom-edge sample, the middle of the bottom edge, the piece just left of the bottom-right corner, bottom-right corner.
+
+Left edge, top to bottom, under the top-left corner: the piece just below that corner, a short left-edge sample, the middle of the left edge, the piece just above the bottom-left corner.
+
+The middle of a side stays in that outer 80-pixel band. It is not a second copy set inward. Edge samples meet their neighbors with no line between them. Keep the example border's colors and material. The finished image contains zero text and zero grid lines.

@@ -27,6 +27,8 @@ public:
   bool shouldBlur() const;
   CBox getGlobalBoundingBox();
   void drawPass(PHLMONITOR, float const &a);
+  // Pull latest POD settings from g_pGlobalState and re-layout.
+  void applySettings();
 
 private:
   PHLWINDOW window() const;
