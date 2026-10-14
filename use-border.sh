@@ -1,5 +1,5 @@
 #!/bin/bash
-# Point imgborders at a generated border and reload live.
+# Point hyprframes at a generated border and reload live.
 # Usage:
 #   ./use-border.sh borders/01-medium-thick
 #   ./use-border.sh 03
@@ -7,7 +7,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BDIR="$ROOT/borders"
-CONF="${HOME}/.config/hypr/imgborders.conf"
+CONF="${HOME}/.config/hypr/hyprframes.conf"
 
 if [[ "${1:-}" == "list" || -z "${1:-}" ]]; then
   ls -1 "$BDIR"/*.png 2>/dev/null | sed "s|$BDIR/||"
@@ -35,7 +35,8 @@ fi
 
 mkdir -p "$(dirname "$CONF")"
 if [[ -f "$src_conf" ]]; then
-  cp -f "$src_conf" "$CONF"
+  # Sample .conf files ship with basename image=; point at this checkout.
+  sed -E "s|^[[:space:]]*image[[:space:]]*=.*|image = ${png}|" "$src_conf" >"$CONF"
 else
   # fallback sizes: guess thickness from filename …tN or default 5
   thick=5
@@ -55,9 +56,9 @@ fi
 echo "→ $CONF"
 grep -E '^(image|sizes|insets|scale|smooth)' "$CONF" || true
 
-if command -v hyprctl >/dev/null 2>&1 && hyprctl plugin list 2>/dev/null | grep -qi imgborders; then
-  hyprctl dispatch imgbordersreload
-  echo "dispatched imgbordersreload"
+if command -v hyprctl >/dev/null 2>&1 && hyprctl plugin list 2>/dev/null | grep -qi hyprframes; then
+  hyprctl dispatch hyprframesreload
+  echo "dispatched hyprframesreload"
 else
-  echo "imgborders not loaded (or no hyprctl) — conf updated for next session"
+  echo "hyprframes not loaded (or no hyprctl) — conf updated for next session"
 fi

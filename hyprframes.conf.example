@@ -1,7 +1,7 @@
-# System defaults. ~/.config/hypr/imgborders.conf overrides these.
+# System defaults. ~/.config/hypr/hyprframes.conf overrides these.
 # Do NOT put these keys in hyprland.conf — Hyprland plugin values crash after hyprbars reloads.
 
-image = /usr/share/neuronix/imgborders/example.png
+image = /usr/share/hyprframes/example.png
 sizes = 5,5,5,5
 # flanks = top, right, bottom, left (PNG px). Extra slice on each side of every corner.
 # 0 = 13-patch (no corner-side images).

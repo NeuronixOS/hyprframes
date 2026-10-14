@@ -11,7 +11,7 @@ inline HANDLE PHANDLE = nullptr;
 
 // Plain POD + path buffer. No Hyprland Config::Values (they die on hyprbars reload).
 struct SImgBorderSettings {
-  char imagePath[512] = "/usr/share/neuronix/imgborders/example.png";
+  char imagePath[512] = "/usr/share/hyprframes/example.png";
   int sizes[4] = {5, 5, 5, 5};     // L R T B — corner / edge thickness in PNG px
   int insets[4] = {1, 1, 1, 1};   // L R T B
   // Center sample on each edge. 0 = no center (9-slice).
@@ -20,6 +20,8 @@ struct SImgBorderSettings {
   // Fixed slice on each side of every corner, along the edge (21-patch).
   // Order matches centers. 0 = no corner-side slices (13-patch).
   int flanks[4] = {0, 0, 0, 0};
+  // Fallback color when an edge has no tile sample. RGBA 0–1.
+  float line[4] = {0.78f, 0.66f, 0.42f, 1.f};
   float scale = 1.f;
   bool smooth = true;
   bool blur = false;
@@ -31,7 +33,7 @@ struct SGlobalTextures {
   // One fixed slice on each side of each corner (drawn once).
   // Top/bottom: left then right. Left/right edges: top then bottom.
   SP<ITexture> tfl, tfr, bfl, bfr, lft, lfb, rft, rfb;
-  // Edge tiles + centers (both repeat between the corner-side slices)
+  // Edge tile (repeated in the gaps) and the center graphic (drawn once).
   SP<ITexture> t, tc;
   SP<ITexture> r, rc;
   SP<ITexture> b, bc;
@@ -48,6 +50,10 @@ struct SGlobalState {
 
 extern UP<SGlobalState> g_pGlobalState;
 
-void imgbordersLoadSettings(SImgBorderSettings &out);
-void imgbordersEnsureTextures();
-void imgbordersReload();
+void hyprframesLoadSettings(SImgBorderSettings &out);
+void hyprframesEnsureTextures();
+class CCompositor;
+
+void hyprframesReload();
+void hyprframesAttachExisting();
+CCompositor *hyprframesCompositor();

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick ImageBorders tester: list PNGs here, click one to apply + reload."""
+"""Quick hyprframes tester: list PNGs here, click one to apply + reload."""
 from __future__ import annotations
 
 import os
@@ -36,24 +36,35 @@ def apply_border(path: Path) -> str:
             return f"FAILED ({r.returncode})\n{out.strip()}"
         return out.strip() or f"applied {stem}"
     # Fallback without use-border.sh
-    conf = Path.home() / ".config/hypr/imgborders.conf"
+    conf = Path.home() / ".config/hypr/hyprframes.conf"
     companion = path.with_suffix(".conf")
     conf.parent.mkdir(parents=True, exist_ok=True)
     if companion.is_file():
-        conf.write_text(companion.read_text(encoding="utf-8"), encoding="utf-8")
+        text = companion.read_text(encoding="utf-8")
+        lines = []
+        replaced = False
+        for line in text.splitlines():
+            if line.lstrip().startswith("image"):
+                lines.append(f"image = {path.resolve()}")
+                replaced = True
+            else:
+                lines.append(line)
+        if not replaced:
+            lines.insert(0, f"image = {path.resolve()}")
+        conf.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         conf.write_text(
-            f"image = {path}\nsizes = 5,5,5,5\ninsets = 1,1,1,1\n"
+            f"image = {path.resolve()}\nsizes = 5,5,5,5\ninsets = 1,1,1,1\n"
             "scale = 1\nsmooth = true\nblur = false\n",
             encoding="utf-8",
         )
-    subprocess.run(["hyprctl", "dispatch", "imgbordersreload"], check=False)
+    subprocess.run(["hyprctl", "dispatch", "hyprframesreload"], check=False)
     return f"applied {stem}"
 
 
 class BorderPicker(Gtk.Window):
     def __init__(self) -> None:
-        super().__init__(title="ImageBorders — pick a frame")
+        super().__init__(title="hyprframes — pick a frame")
         self.set_default_size(720, 560)
         self.set_border_width(10)
         self.connect("destroy", Gtk.main_quit)
@@ -63,8 +74,8 @@ class BorderPicker(Gtk.Window):
 
         head = Gtk.Label()
         head.set_markup(
-            "<b>ImageBorders test</b> — click a PNG to apply "
-            "<tt>imgbordersreload</tt>"
+            "<b>hyprframes test</b> — click a PNG to apply "
+            "<tt>hyprframesreload</tt>"
         )
         head.set_xalign(0)
         vbox.pack_start(head, False, False, 0)
@@ -146,7 +157,7 @@ class BorderPicker(Gtk.Window):
                 )
             except GLib.Error:
                 pass
-            self.store.append([bg, p.name, str(p)])
+            self.store.append([bg, p.stem, str(p)])
         self.status.set_text(f"{len(items)} borders in {BDIR}")
 
     def _selected_path(self) -> Path | None:
@@ -177,12 +188,12 @@ class BorderPicker(Gtk.Window):
 
     def _reload_only(self, *_args) -> None:
         r = subprocess.run(
-            ["hyprctl", "dispatch", "imgbordersreload"],
+            ["hyprctl", "dispatch", "hyprframesreload"],
             capture_output=True,
             text=True,
         )
         self.status.set_text(
-            f"imgbordersreload → {(r.stdout or r.stderr or 'ok').strip()}"
+            f"hyprframesreload → {(r.stdout or r.stderr or 'ok').strip()}"
         )
 
     def _regen(self, *_args) -> None:

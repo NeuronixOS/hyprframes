@@ -1,11 +1,11 @@
-# ImageBorders — how the PNG is drawn
+# hyprframes — how the PNG is drawn
 
 The plugin treats the PNG as a **21-patch frame** (`flanks = 0` is the older 13-patch; `centers = 0` is a 9-slice):
 
-- **4 corners** — drawn once, never tiled
-- **8 corner sides** — one extra image on each edge that meets a corner, drawn once
-- **4 edge tiles** — REPEAT in the gaps beside the center band
-- **4 edge centers** — REPEAT across **half** of that side (window width on top/bottom, window height on left/right)
+- **4 corners** — one square each (TL, TR, BR, BL), drawn once at the border size, never tiled
+- **8 corner sides** — the flank graphic beside each corner, drawn once at its PNG length
+- **4 edge tiles** — REPEAT in the gaps beside the center band, each copy at the sample's own size
+- **4 edge centers** — one graphic each, drawn once at its PNG size, never tiled
 - **Inner middle** of the PNG — never drawn (window content sits there)
 
 ```
@@ -24,7 +24,7 @@ On screen, each edge is drawn as:
   [corner][flank][tile…][center…][…tile][flank][corner]
 ```
 
-Each flank is the extra image on that side of the corner and is drawn once. The center sample repeats until it covers half of that side, without covering the flanks. Tiles repeat in the gaps.
+Each flank is the graphic beside a corner. It is drawn once, at the pixel length stored in the PNG, and is not repeated. The center sample is one graphic, drawn once at its own pixel size. Top, right, bottom, and left each have their own center graphic. Tiles repeat in the gaps, one sample wide each time. Nothing is stretched to fit the window.
 
 ```
 example.png  (16×16)     sizes = 5,5,5,5   centers = 0,0,0,0  (9-slice)
@@ -61,7 +61,7 @@ If `left + right >= image width` (or top+bottom vs height), slicing is rejected 
 ## What to paint in each region
 
 **Corners (TL, TR, BR, BL)**  
-Drawn once at each window corner. Put unique detail here (screws, rounded caps, ornaments). They do **not** tile.
+One square each, drawn once at the border size. Put unique detail here (screws, rounded caps, ornaments). They do **not** tile.
 
 **Edge tiles (TOP/BOTTOM/LEFT/RIGHT tile samples)**  
 These must **tile seamlessly**. TOP/BOTTOM tile horizontally; LEFT/RIGHT tile vertically. In the PNG they sit in the **first** part of each mid strip (`[TILE][CENTER]`).
@@ -111,8 +111,8 @@ visible_px = (sizes[side] - insets[side]) * scale * monitor_scale
 | `insets` | Pull the frame **into** the window. |
 | `smooth` | `false` = nearest-neighbor (pixel art). `true` = smoothed when scaled. |
 | `blur` | Blur behind transparent parts of the frame. |
-| `flanks` | Fixed slice on each side of every corner (PNG px). `0` skips them. |
-| `centers` | Repeating mid-edge sample. The band covers half of that side. `0` = no center. |
+| `flanks` | Flank graphic beside each corner, in PNG pixels. Drawn once at that size. `0` skips them. |
+| `centers` | One mid-edge graphic per side, in PNG pixels. Drawn once at that size. `0` = no center. |
 
 ## Making a new border (checklist)
 
@@ -120,12 +120,12 @@ visible_px = (sizes[side] - insets[side]) * scale * monitor_scale
 2. Leave the **inside empty** (alpha 0).
 3. Measure frame thickness → `sizes`. Measure each side’s center motif → `centers`.
 4. Confirm **tile** parts wrap seamlessly; center motifs can be unique.
-5. Put the file somewhere stable, e.g. `~/.config/hypr/borders/` or `/usr/share/neuronix/imgborders/`.
-6. Point settings at it:
+5. Put the file somewhere stable, e.g. `~/.config/hypr/borders/` or `/usr/share/hyprframes/`.
+6. Point settings at it (use an absolute `image` path):
 
 ```
-# ~/.config/hypr/imgborders.conf
-image = /usr/share/neuronix/imgborders/example.png
+# ~/.config/hypr/hyprframes.conf
+image = /usr/share/hyprframes/example.png
 sizes = 5,5,5,5
 centers = 0,0,0,0
 insets = 1,1,1,1
@@ -137,44 +137,40 @@ blur = false
 7. Apply without logging out:
 
 ```
-hyprctl dispatch imgbordersreload
+hyprctl dispatch hyprframesreload
 ```
 
 Prefer this over `hyprctl reload` (full config reload still fights hyprbars on this desktop).
 
-Do **not** put these keys in `hyprland.conf`. This plugin reads only `imgborders.conf`.
+Do **not** put these keys in `hyprland.conf`. This plugin reads only `hyprframes.conf`.
 
 ## Generated test borders
 
 ```bash
 cd borders && python3 generate.py   # heavy/thick 13-patch PNGs + .conf
-./pick.sh                           # GTK picker → writes conf + imgbordersreload
+./pick.sh                           # GTK picker → writes conf + hyprframesreload
 # or: ../use-border.sh 01
 ```
 
 ---
 
-## Debug log (survives crashes)
+## Build
 
-Plugin writes a flushed log to:
+**Deps:** CMake, a C++23 compiler, pkg-config, Hyprland headers (`hyprland`), `libdrm`, `pixman-1`, `pangocairo`, plus `curl` or `wget` for the one-time header fetch.
 
-```
-~/.cache/hyprland/imgborders.log
-```
-
-Override with `IMGBORDERS_LOG=/path`. On SEGV/ABRT it appends
-`*** IMGBORDERS CRASH signal=… stage=…` (last breadcrumb) then chains to
-Hyprland’s crash reporter.
+`third_party/` is **not** in git. Configure/build downloads [hyprutils v0.13.0](https://github.com/hyprwm/hyprutils/releases/tag/v0.13.0) headers there (needed so builds still work when the system has libhyprutils ≥ 0.14).
 
 ```bash
-tail -100 ~/.cache/hyprland/imgborders.log
+./fetch-third-party.sh   # optional; also run automatically by cmake / debug.sh
+./debug.sh               # cmake + build → build/libhyprframes.so
+./enable-next-login.sh   # then a new Hyprland session — not hyprctl plugin load
 ```
 
-## Build / ISO (this machine)
+Or without the helper scripts:
 
 ```bash
-./debug.sh
-./enable-next-login.sh    # then a new Hyprland session — not hyprctl plugin load
+cmake -S . -B build      # runs fetch-third-party.sh if headers are missing
+cmake --build build -j"$(nproc)"
 ```
 
-ISO: `neuronix-iso/setup.sh` stages sources to `/usr/src/neuronix/imgborders`; hook `998` builds `libimgborders.so` to `/usr/local/lib/hyprland/plugins/`. `hyprland.conf` uses `plugin =` **before** hyprbars.
+Load with `plugin = /path/to/libhyprframes.so` in `hyprland.conf` **before** hyprbars (or other titlebar plugins). Prefer a new session over `hyprctl plugin load` / `hyprctl reload` after hyprbars is already up.

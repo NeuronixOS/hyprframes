@@ -1,11 +1,11 @@
 #include "ImgBorder.hpp"
 #include "ImgBorderPassElement.hpp"
-#include "Log.hpp"
 #include "globals.hpp"
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/decorations/DecorationPositioner.hpp>
@@ -13,21 +13,15 @@
 #include <hyprutils/math/Vector2D.hpp>
 #include <GLES3/gl32.h>
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <exception>
 
 using namespace GL;
 using namespace Render;
 
-namespace {
-std::atomic<int> g_drawPassLogs{0};
-}
-
 CImgBorder::CImgBorder(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
   m_window = pWindow;
   // Copy POD only. Never repositionDeco from the ctor.
-  ImgLog::stage("CImgBorder.ctor");
   if (g_pGlobalState) {
     const auto &s = g_pGlobalState->settings;
     for (int i = 0; i < 4; i++) {
@@ -38,7 +32,6 @@ CImgBorder::CImgBorder(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     m_shouldSmooth = s.smooth;
     m_shouldBlur = s.blur;
   }
-  ImgLog::log("CImgBorder constructed");
 }
 
 CImgBorder::~CImgBorder() = default;
@@ -68,7 +61,7 @@ SDecorationPositioningInfo CImgBorder::getPositioningInfo() {
                DECORATION_EDGE_TOP | DECORATION_EDGE_BOTTOM;
   info.priority = 4999;
   info.reserved = true;
-  if (g_pGlobalState && g_pGlobalState->textures.ready) {
+    if (g_pGlobalState && g_pGlobalState->textures.ready) {
     info.desiredExtents = {
         .topLeft = {(m_sizes[0] - m_insets[0]) * m_scale,
                     (m_sizes[2] - m_insets[2]) * m_scale},
@@ -88,13 +81,8 @@ void CImgBorder::draw(PHLMONITOR pMonitor, const float &a) {
     return;
 
   try {
-    ImgLog::stageQuiet("draw.ensureTextures");
-    imgbordersEnsureTextures();
-  } catch (const std::exception &e) {
-    ImgLog::log("ERROR draw ensureTextures: %s", e.what());
-    return;
+    hyprframesEnsureTextures();
   } catch (...) {
-    ImgLog::log("ERROR draw ensureTextures unknown");
     return;
   }
 
@@ -106,7 +94,6 @@ void CImgBorder::draw(PHLMONITOR pMonitor, const float &a) {
       !PWINDOW->m_ruleApplicator->decorate().valueOrDefault())
     return;
 
-  ImgLog::stageQuiet("draw.queuePass");
   CImgBorderPassElement::SData data = {.deco = this, .a = a};
   g_pHyprRenderer->m_renderPass.add(makeUnique<CImgBorderPassElement>(data));
 }
@@ -153,145 +140,184 @@ CBox CImgBorder::getGlobalBoundingBox() {
 }
 
 static void drawSlice(SP<ITexture> tex, const CBox &box, float a, bool blur,
-                      bool repeat, Vector2D uvBR) {
+                      bool repeat, Vector2D uvTL, Vector2D uvBR) {
   if (!tex || tex->m_texID == 0 || !g_pHyprOpenGL || box.w <= 0 || box.h <= 0)
     return;
   if (!std::isfinite(box.x) || !std::isfinite(box.y) || !std::isfinite(box.w) ||
       !std::isfinite(box.h) || !std::isfinite(a))
     return;
 
+  const bool cropped = uvTL.x > 0.001 || uvTL.y > 0.001 || uvBR.x < 0.999 ||
+                       uvBR.y < 0.999;
   CHyprOpenGLImpl::STextureRenderData data;
   data.a = a;
   data.blur = blur;
-  data.allowCustomUV = repeat;
+  data.allowCustomUV = repeat || cropped;
   data.wrapX = repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE;
   data.wrapY = repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE;
   data.discardMode = DISCARD_ALPHA;
-  if (repeat) {
-    if (!std::isfinite(uvBR.x) || !std::isfinite(uvBR.y) || uvBR.x <= 0.f ||
-        uvBR.y <= 0.f)
+  if (repeat || cropped) {
+    if (!std::isfinite(uvTL.x) || !std::isfinite(uvTL.y) ||
+        !std::isfinite(uvBR.x) || !std::isfinite(uvBR.y) || uvBR.x <= uvTL.x ||
+        uvBR.y <= uvTL.y)
       return;
-    uvBR.x = std::clamp(uvBR.x, 0.01, 64.0);
-    uvBR.y = std::clamp(uvBR.y, 0.01, 64.0);
-    data.primarySurfaceUVTopLeft = {0, 0};
+    data.primarySurfaceUVTopLeft = uvTL;
     data.primarySurfaceUVBottomRight = uvBR;
   }
   g_pHyprOpenGL->renderTexture(tex, box, data);
 }
 
-// Center motif is drawn once at its natural scaled size (not stretched across
-// half the window). Stretching/repeating a unique plaque with huge UV spans
-// has hung the Intel GPU → Hyprland watchdog SIGKILL (no crash report).
-static float fixedLen(const SP<ITexture> &tex, float axis, float scale,
-                      float limit) {
-  if (!tex || axis <= 0.f || scale <= 0.f || limit <= 0.f)
-    return 0.f;
-  return std::min(axis * scale, limit);
+static void drawLine(const CBox &box, float a) {
+  if (!g_pGlobalState || !g_pHyprOpenGL || box.w <= 0.f || box.h <= 0.f)
+    return;
+  const float *c = g_pGlobalState->settings.line;
+  if (c[3] <= 0.f)
+    return;
+  g_pHyprOpenGL->renderRect(
+      box, CHyprColor{c[0], c[1], c[2], c[3] * a}, {});
 }
 
-// [flank][tile…][center][…tile][flank]
-static void drawEdgeH(SP<ITexture> tile, SP<ITexture> center,
-                      SP<ITexture> flankL, SP<ITexture> flankR, float x,
-                      float y, float width, float height, float /*windowSpan*/,
-                      float scale, float a, bool blur) {
-  if (width <= 0 || height <= 0)
+static float graphicLen(const SP<ITexture> &tex, bool horizontal, float thick);
+
+// Repeat the tile at its own size. Each draw covers at most a few copies so
+// the texture coordinate stays small; one huge GL_REPEAT span crashes the iGPU.
+static constexpr float kMaxRepeat = 8.f;
+
+static void drawRepeat(SP<ITexture> tex, float x, float y, float along,
+                       float cross, bool horizontal, float a, bool blur) {
+  if (!tex || along <= 0.f || cross <= 0.f)
+    return;
+  const float unit = graphicLen(tex, horizontal, cross);
+  if (!(unit > 0.5f))
+    return;
+  float done = 0.f;
+  while (done < along - 0.25f) {
+    const float room = along - done;
+    const float span = std::min(room, unit * kMaxRepeat);
+    if (span <= 0.25f)
+      break;
+    const float reps = span / unit;
+    Vector2D uvTL{0., 0.}, uvBR{1., 1.};
+    if (horizontal)
+      uvBR.x = reps;
+    else
+      uvBR.y = reps;
+    const CBox box = horizontal ? CBox{{x + done, y}, {span, cross}}
+                                : CBox{{x, y + done}, {cross, span}};
+    drawSlice(tex, box, a, blur, true, uvTL, uvBR);
+    done += span;
+  }
+}
+
+// Length of the graphic at the corner's thickness. Never longer than the
+// picture itself, so a wider window lengthens the connecting line instead.
+static float graphicLen(const SP<ITexture> &tex, bool horizontal, float thick) {
+  if (!tex || thick <= 0.f)
+    return 0.f;
+  const float along = horizontal ? static_cast<float>(tex->m_size.x)
+                                 : static_cast<float>(tex->m_size.y);
+  const float cross = horizontal ? static_cast<float>(tex->m_size.y)
+                                 : static_cast<float>(tex->m_size.x);
+  if (along <= 0.f || cross <= 0.f)
+    return 0.f;
+  return along * (thick / cross);
+}
+
+static void drawGraphic(SP<ITexture> tex, float x, float y, float along,
+                        float cross, bool horizontal, float a, bool blur) {
+  if (!tex || along <= 0.f || cross <= 0.f)
+    return;
+  const float full = graphicLen(tex, horizontal, cross);
+  float span = 1.f;
+  float off = 0.f;
+  if (full > along && full > 0.f) {
+    span = along / full;
+    off = (1.f - span) * 0.5f;
+  }
+  Vector2D uvTL{0., 0.}, uvBR{1., 1.};
+  if (horizontal) {
+    uvTL.x = off;
+    uvBR.x = off + span;
+  } else {
+    uvTL.y = off;
+    uvBR.y = off + span;
+  }
+  const CBox box = horizontal ? CBox{{x, y}, {along, cross}}
+                              : CBox{{x, y}, {cross, along}};
+  drawSlice(tex, box, a, blur, false, uvTL, uvBR);
+}
+
+static void fitTrio(float &a, float &b, float &c, float limit) {
+  const float need = a + b + c;
+  if (need <= limit || need <= 0.f)
+    return;
+  const float k = limit / need;
+  a *= k;
+  b *= k;
+  c *= k;
+}
+
+static void drawEdgeH(SP<ITexture> center, SP<ITexture> flankL,
+                      SP<ITexture> flankR, SP<ITexture> tile, float x, float y,
+                      float width, float thick, float a, bool blur) {
+  if (width <= 0 || thick <= 0)
     return;
 
-  const float fL =
-      fixedLen(flankL, flankL ? flankL->m_size.x : 0.f, scale, width * 0.5f);
-  const float fR = fixedLen(flankR, flankR ? flankR->m_size.x : 0.f, scale,
-                            std::max(0.f, width - fL));
-  if (fL > 0.f)
-    drawSlice(flankL, {{x, y}, {fL, height}}, a, blur, false, {1., 1.});
-  if (fR > 0.f)
-    drawSlice(flankR, {{x + width - fR, y}, {fR, height}}, a, blur, false,
-              {1., 1.});
+  float fL = graphicLen(flankL, true, thick);
+  float fR = graphicLen(flankR, true, thick);
+  float cW = graphicLen(center, true, thick);
+  fitTrio(fL, cW, fR, width);
 
   const float innerX = x + fL;
   const float innerW = width - fL - fR;
-  if (innerW <= 0.f)
-    return;
-
-  float centerW = 0.f;
-  if (center && center->m_size.x > 0 && scale > 0)
-    centerW = std::min((float)(center->m_size.x * scale), innerW);
-
-  if (centerW <= 0.f) {
-    if (!tile || tile->m_size.x <= 0)
-      return;
-    Vector2D uv = {1., 1.};
-    if (scale > 0)
-      uv.x = innerW / (tile->m_size.x * scale);
-    drawSlice(tile, {{innerX, y}, {innerW, height}}, a, blur, true, uv);
-    return;
+  if (innerW > 0.f) {
+    if (tile)
+      drawRepeat(tile, innerX, y, innerW, thick, true, a, blur);
+    else
+      drawLine({{innerX, y}, {innerW, thick}}, a);
   }
-
-  const float side = (innerW - centerW) * 0.5f;
-  if (tile && tile->m_size.x > 0 && side > 0.f) {
-    Vector2D uv = {1., 1.};
-    if (scale > 0)
-      uv.x = side / (tile->m_size.x * scale);
-    drawSlice(tile, {{innerX, y}, {side, height}}, a, blur, true, uv);
-    drawSlice(tile, {{innerX + side + centerW, y}, {side, height}}, a, blur,
-              true, uv);
-  }
-  drawSlice(center, {{innerX + side, y}, {centerW, height}}, a, blur, false,
-            {1., 1.});
+  if (fL > 0.f)
+    drawGraphic(flankL, x, y, fL, thick, true, a, blur);
+  if (fR > 0.f)
+    drawGraphic(flankR, x + width - fR, y, fR, thick, true, a, blur);
+  if (cW <= 0.f || innerW <= 0.f)
+    return;
+  const float shown = std::min(cW, innerW);
+  drawGraphic(center, innerX + (innerW - shown) * 0.5f, y, shown, thick, true,
+              a, blur);
 }
 
-static void drawEdgeV(SP<ITexture> tile, SP<ITexture> center,
-                      SP<ITexture> flankT, SP<ITexture> flankB, float x,
-                      float y, float width, float height, float /*windowSpan*/,
-                      float scale, float a, bool blur) {
-  if (width <= 0 || height <= 0)
+static void drawEdgeV(SP<ITexture> center, SP<ITexture> flankT,
+                      SP<ITexture> flankB, SP<ITexture> tile, float x, float y,
+                      float thick, float length, float a, bool blur) {
+  if (thick <= 0 || length <= 0)
     return;
 
-  const float fT =
-      fixedLen(flankT, flankT ? flankT->m_size.y : 0.f, scale, height * 0.5f);
-  const float fB = fixedLen(flankB, flankB ? flankB->m_size.y : 0.f, scale,
-                            std::max(0.f, height - fT));
-  if (fT > 0.f)
-    drawSlice(flankT, {{x, y}, {width, fT}}, a, blur, false, {1., 1.});
-  if (fB > 0.f)
-    drawSlice(flankB, {{x, y + height - fB}, {width, fB}}, a, blur, false,
-              {1., 1.});
+  float fT = graphicLen(flankT, false, thick);
+  float fB = graphicLen(flankB, false, thick);
+  float cH = graphicLen(center, false, thick);
+  fitTrio(fT, cH, fB, length);
 
   const float innerY = y + fT;
-  const float innerH = height - fT - fB;
-  if (innerH <= 0.f)
-    return;
-
-  float centerH = 0.f;
-  if (center && center->m_size.y > 0 && scale > 0)
-    centerH = std::min((float)(center->m_size.y * scale), innerH);
-
-  if (centerH <= 0.f) {
-    if (!tile || tile->m_size.y <= 0)
-      return;
-    Vector2D uv = {1., 1.};
-    if (scale > 0)
-      uv.y = innerH / (tile->m_size.y * scale);
-    drawSlice(tile, {{x, innerY}, {width, innerH}}, a, blur, true, uv);
-    return;
+  const float innerH = length - fT - fB;
+  if (innerH > 0.f) {
+    if (tile)
+      drawRepeat(tile, x, innerY, innerH, thick, false, a, blur);
+    else
+      drawLine({{x, innerY}, {thick, innerH}}, a);
   }
-
-  const float side = (innerH - centerH) * 0.5f;
-  if (tile && tile->m_size.y > 0 && side > 0.f) {
-    Vector2D uv = {1., 1.};
-    if (scale > 0)
-      uv.y = side / (tile->m_size.y * scale);
-    drawSlice(tile, {{x, innerY}, {width, side}}, a, blur, true, uv);
-    drawSlice(tile, {{x, innerY + side + centerH}, {width, side}}, a, blur,
-              true, uv);
-  }
-  drawSlice(center, {{x, innerY + side}, {width, centerH}}, a, blur, false,
-            {1., 1.});
+  if (fT > 0.f)
+    drawGraphic(flankT, x, y, fT, thick, false, a, blur);
+  if (fB > 0.f)
+    drawGraphic(flankB, x, y + length - fB, fB, thick, false, a, blur);
+  if (cH <= 0.f || innerH <= 0.f)
+    return;
+  const float shown = std::min(cH, innerH);
+  drawGraphic(center, x, innerY + (innerH - shown) * 0.5f, shown, thick, false,
+              a, blur);
 }
 
 void CImgBorder::drawPass(PHLMONITOR pMonitor, const float &a) {
-  const int dlog = g_drawPassLogs.fetch_add(1);
-  const bool verbose = dlog < 8;
-
   const auto PWINDOW = window();
   if (!pMonitor || !validMapped(PWINDOW) || !g_pGlobalState ||
       !g_pGlobalState->textures.ready)
@@ -300,26 +326,21 @@ void CImgBorder::drawPass(PHLMONITOR pMonitor, const float &a) {
   try {
     const auto &tex = g_pGlobalState->textures;
 
-    ImgLog::stageQuiet("drawPass.box");
     auto box = getGlobalBoundingBox()
                    .translate(PWINDOW->m_floatingOffset - pMonitor->m_position)
                    .scale(pMonitor->m_scale);
 
     const auto scale = m_scale * pMonitor->m_scale;
 
-    const auto BORDER_LEFT = (float)m_sizes[0] * scale;
-    const auto BORDER_RIGHT = (float)m_sizes[1] * scale;
-    const auto BORDER_TOP = (float)m_sizes[2] * scale;
-    const auto BORDER_BOTTOM = (float)m_sizes[3] * scale;
+    const float borderL = std::max(0.f, (float)(m_sizes[0] - m_insets[0]) * scale);
+    const float borderR = std::max(0.f, (float)(m_sizes[1] - m_insets[1]) * scale);
+    const float borderT = std::max(0.f, (float)(m_sizes[2] - m_insets[2]) * scale);
+    const float borderB = std::max(0.f, (float)(m_sizes[3] - m_insets[3]) * scale);
 
-    const auto HEIGHT_MID = box.height - BORDER_TOP - BORDER_BOTTOM;
-    const auto WIDTH_MID = box.width - BORDER_LEFT - BORDER_RIGHT;
+    const auto HEIGHT_MID = box.height - borderT - borderB;
+    const auto WIDTH_MID = box.width - borderL - borderR;
     if (HEIGHT_MID <= 0 || WIDTH_MID <= 0)
       return;
-
-    if (verbose)
-      ImgLog::log("drawPass #%d box=%.0fx%.0f mid=%.0fx%.0f", dlog, box.width,
-                  box.height, WIDTH_MID, HEIGHT_MID);
 
     const auto wasUsingNearestNeighbour =
         g_pHyprRenderer->m_renderData.useNearestNeighbor;
@@ -327,45 +348,33 @@ void CImgBorder::drawPass(PHLMONITOR pMonitor, const float &a) {
 
     const bool blur = shouldBlur();
 
-    ImgLog::stageQuiet("drawPass.corners");
+    drawEdgeH(tex.tc, tex.tfl, tex.tfr, tex.t, box.x + borderL, box.y,
+              WIDTH_MID, borderT, a, blur);
+    drawEdgeH(tex.bc, tex.bfl, tex.bfr, tex.b, box.x + borderL,
+              box.y + box.height - borderB, WIDTH_MID, borderB, a, blur);
+    drawEdgeV(tex.lc, tex.lft, tex.lfb, tex.l, box.x, box.y + borderT, borderL,
+              HEIGHT_MID, a, blur);
+    drawEdgeV(tex.rc, tex.rft, tex.rfb, tex.r, box.x + box.width - borderR,
+              box.y + borderT, borderR, HEIGHT_MID, a, blur);
+
     if (tex.tl)
-      drawSlice(tex.tl, {box.pos(), {BORDER_LEFT, BORDER_TOP}}, a, blur, false,
+      drawSlice(tex.tl, {box.pos(), {borderL, borderT}}, a, blur, false, {0., 0.},
                 {1., 1.});
     if (tex.tr)
       drawSlice(tex.tr,
-                {{box.x + box.width - BORDER_RIGHT, box.y},
-                 {BORDER_RIGHT, BORDER_TOP}},
-                a, blur, false, {1., 1.});
+                {{box.x + box.width - borderR, box.y}, {borderR, borderT}}, a,
+                blur, false, {0., 0.}, {1., 1.});
     if (tex.br)
       drawSlice(tex.br,
-                {{box.x + box.width - BORDER_RIGHT,
-                  box.y + box.height - BORDER_BOTTOM},
-                 {BORDER_RIGHT, BORDER_BOTTOM}},
-                a, blur, false, {1., 1.});
+                {{box.x + box.width - borderR, box.y + box.height - borderB},
+                 {borderR, borderB}},
+                a, blur, false, {0., 0.}, {1., 1.});
     if (tex.bl)
       drawSlice(tex.bl,
-                {{box.x, box.y + box.height - BORDER_BOTTOM},
-                 {BORDER_LEFT, BORDER_BOTTOM}},
-                a, blur, false, {1., 1.});
-
-    ImgLog::stageQuiet("drawPass.edgesH");
-    drawEdgeH(tex.t, tex.tc, tex.tfl, tex.tfr, box.x + BORDER_LEFT, box.y,
-              WIDTH_MID, BORDER_TOP, box.width, scale, a, blur);
-    drawEdgeH(tex.b, tex.bc, tex.bfl, tex.bfr, box.x + BORDER_LEFT,
-              box.y + box.height - BORDER_BOTTOM, WIDTH_MID, BORDER_BOTTOM,
-              box.width, scale, a, blur);
-    ImgLog::stageQuiet("drawPass.edgesV");
-    drawEdgeV(tex.l, tex.lc, tex.lft, tex.lfb, box.x, box.y + BORDER_TOP,
-              BORDER_LEFT, HEIGHT_MID, box.height, scale, a, blur);
-    drawEdgeV(tex.r, tex.rc, tex.rft, tex.rfb, box.x + box.width - BORDER_RIGHT,
-              box.y + BORDER_TOP, BORDER_RIGHT, HEIGHT_MID, box.height, scale,
-              a, blur);
+                {{box.x, box.y + box.height - borderB}, {borderL, borderB}}, a,
+                blur, false, {0., 0.}, {1., 1.});
 
     g_pHyprRenderer->m_renderData.useNearestNeighbor = wasUsingNearestNeighbour;
-    ImgLog::stageQuiet("idle");
-  } catch (const std::exception &e) {
-    ImgLog::log("ERROR drawPass: %s", e.what());
   } catch (...) {
-    ImgLog::log("ERROR drawPass unknown");
   }
 }

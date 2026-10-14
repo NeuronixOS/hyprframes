@@ -1,7 +1,6 @@
 #include "globals.hpp"
 #include "ImgBorder.hpp"
 #include "ImgUtils.hpp"
-#include "Log.hpp"
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <algorithm>
@@ -46,6 +45,26 @@ static void parseGaps(const std::string &v, int out[4]) {
   }
 }
 
+static void parseColor(const std::string &v, float out[4]) {
+  std::string h = v;
+  if (!h.empty() && h.front() == '#')
+    h.erase(h.begin());
+  if (h.size() != 6 && h.size() != 8)
+    return;
+  const unsigned long n = std::stoul(h, nullptr, 16);
+  if (h.size() == 6) {
+    out[0] = ((n >> 16) & 255) / 255.f;
+    out[1] = ((n >> 8) & 255) / 255.f;
+    out[2] = (n & 255) / 255.f;
+    out[3] = 1.f;
+  } else {
+    out[0] = ((n >> 24) & 255) / 255.f;
+    out[1] = ((n >> 16) & 255) / 255.f;
+    out[2] = ((n >> 8) & 255) / 255.f;
+    out[3] = (n & 255) / 255.f;
+  }
+}
+
 static void loadFile(const std::string &path, SImgBorderSettings &out) {
   std::ifstream in(path);
   if (!in)
@@ -77,6 +96,8 @@ static void loadFile(const std::string &path, SImgBorderSettings &out) {
         parseGaps(val, out.centers);
       else if (key == "flanks")
         parseGaps(val, out.flanks);
+      else if (key == "line")
+        parseColor(val, out.line);
       else if (key == "scale")
         out.scale = std::stof(val);
       else if (key == "smooth")
@@ -88,34 +109,35 @@ static void loadFile(const std::string &path, SImgBorderSettings &out) {
   }
 }
 
-void imgbordersLoadSettings(SImgBorderSettings &out) {
-  loadFile("/usr/share/neuronix/imgborders/imgborders.conf", out);
+void hyprframesLoadSettings(SImgBorderSettings &out) {
+  loadFile("/usr/share/hyprframes/hyprframes.conf", out);
+  loadFile("/usr/local/share/hyprframes/hyprframes.conf", out);
   const char *home = std::getenv("HOME");
   if (home)
-    loadFile(std::string(home) + "/.config/hypr/imgborders.conf", out);
+    loadFile(std::string(home) + "/.config/hypr/hyprframes.conf", out);
 }
 
-void imgbordersEnsureTextures() {
+void hyprframesEnsureTextures() {
   if (!g_pGlobalState)
     return;
   auto &tex = g_pGlobalState->textures;
   if (tex.ready || tex.failed)
     return;
 
-  ImgLog::stage("ensureTextures");
   auto &s = g_pGlobalState->settings;
   if (s.imagePath[0] == '\0' || !std::filesystem::exists(s.imagePath)) {
     const char *home = std::getenv("HOME");
-    const char *fallbacks[3] = {
-        "/usr/share/neuronix/imgborders/example.png",
+    static char localShare[512];
+    const char *fallbacks[4] = {
+        "/usr/share/hyprframes/example.png",
+        "/usr/local/share/hyprframes/example.png",
         nullptr,
         nullptr,
     };
-    static char localShare[512];
     if (home) {
       std::snprintf(localShare, sizeof(localShare),
-                    "%s/.local/share/neuronix/imgborders/example.png", home);
-      fallbacks[1] = localShare;
+                    "%s/.local/share/hyprframes/example.png", home);
+      fallbacks[2] = localShare;
     }
     for (const char *fb : fallbacks) {
       if (fb && std::filesystem::exists(fb)) {
@@ -125,28 +147,22 @@ void imgbordersEnsureTextures() {
     }
   }
   if (s.imagePath[0] == '\0' || !std::filesystem::exists(s.imagePath)) {
-    ImgLog::log("ERROR no image path / missing file");
     tex.failed = true;
     return;
   }
 
   for (int i = 0; i < 4; i++) {
     if (s.sizes[i] < 0 || s.centers[i] < 0 || s.flanks[i] < 0) {
-      ImgLog::log("ERROR negative sizes/centers/flanks");
       tex.failed = true;
       return;
     }
   }
 
-  ImgLog::log("loading %s", s.imagePath);
-  ImgLog::stage("loadPNG");
   auto src = ImgUtils::load(s.imagePath);
   if (!src) {
-    ImgLog::log("ERROR ImgUtils::load returned null");
     tex.failed = true;
     return;
   }
-  ImgLog::log("png size=%.0fx%.0f", src->m_size.x, src->m_size.y);
 
   const float L = (float)s.sizes[0];
   const float R = (float)s.sizes[1];
@@ -155,8 +171,6 @@ void imgbordersEnsureTextures() {
   const float WM = src->m_size.x - L - R;
   const float HM = src->m_size.y - T - B;
   if (WM <= 0 || HM <= 0) {
-    ImgLog::log("ERROR mid strip invalid WM=%.1f HM=%.1f (sizes too large?)",
-                WM, HM);
     tex.failed = true;
     return;
   }
@@ -182,18 +196,13 @@ void imgbordersEnsureTextures() {
   const float HbR = right.tile, HcR = right.center, FrT = right.flankA, FrB = right.flankB;
   const float Wb = bottom.tile, Bc = bottom.center, FbL = bottom.flankA, FbR = bottom.flankB;
   const float Ht = left.tile, HcL = left.center, FlT = left.flankA, FlB = left.flankB;
-  ImgLog::log("21-patch mid=%.0fx%.0f flank/tile/center T=%.0f/%.0f/%.0f "
-              "R=%.0f/%.0f/%.0f B=%.0f/%.0f/%.0f L=%.0f/%.0f/%.0f",
-              WM, HM, FtL, Wt, Wc, FrT, HbR, HcR, FbL, Wb, Bc, FlT, Ht, HcL);
 
-  ImgLog::stage("slice.corners");
   tex.tl = ImgUtils::sliceTexture(src, {{0., 0.}, {L, T}});
   tex.tr = ImgUtils::sliceTexture(src, {{src->m_size.x - R, 0.}, {R, T}});
   tex.br = ImgUtils::sliceTexture(
       src, {{src->m_size.x - R, src->m_size.y - B}, {R, B}});
   tex.bl = ImgUtils::sliceTexture(src, {{0., src->m_size.y - B}, {L, B}});
 
-  ImgLog::stage("slice.edges");
   auto sliceOrNull = [&](float x, float y, float w, float h) -> SP<ITexture> {
     if (w <= 0.f || h <= 0.f)
       return nullptr;
@@ -227,12 +236,6 @@ void imgbordersEnsureTextures() {
   tex.rfb = sliceOrNull(rx, T + FrT + HbR + HcR, R, FrB);
 
   tex.ready = true;
-  ImgLog::stage("ensureTextures.done");
-  ImgLog::log("textures ready tl=%d tr=%d br=%d bl=%d t=%d tc=%d r=%d rc=%d "
-              "b=%d bc=%d l=%d lc=%d",
-              tex.tl ? 1 : 0, tex.tr ? 1 : 0, tex.br ? 1 : 0, tex.bl ? 1 : 0,
-              tex.t ? 1 : 0, tex.tc ? 1 : 0, tex.r ? 1 : 0, tex.rc ? 1 : 0,
-              tex.b ? 1 : 0, tex.bc ? 1 : 0, tex.l ? 1 : 0, tex.lc ? 1 : 0);
 }
 
 static void clearTextures(SGlobalTextures &tex) {
@@ -247,65 +250,42 @@ static void clearTextures(SGlobalTextures &tex) {
   tex.l = tex.lc = nullptr;
 }
 
-void imgbordersReload() {
+void hyprframesReload() {
   if (!g_pGlobalState)
     return;
 
-  ImgLog::stage("reload");
   clearTextures(g_pGlobalState->textures);
 
   g_pGlobalState->settings = SImgBorderSettings{};
-  imgbordersLoadSettings(g_pGlobalState->settings);
-  ImgLog::log("reload image=%s centers=%d,%d,%d,%d",
-              g_pGlobalState->settings.imagePath,
-              g_pGlobalState->settings.centers[0],
-              g_pGlobalState->settings.centers[1],
-              g_pGlobalState->settings.centers[2],
-              g_pGlobalState->settings.centers[3]);
+  hyprframesLoadSettings(g_pGlobalState->settings);
 
   try {
-    imgbordersEnsureTextures();
-  } catch (const std::exception &e) {
-    ImgLog::log("ERROR ensureTextures: %s", e.what());
-    g_pGlobalState->textures.failed = true;
-    return;
+    hyprframesEnsureTextures();
   } catch (...) {
-    ImgLog::log("ERROR ensureTextures unknown");
     g_pGlobalState->textures.failed = true;
     return;
   }
 
-  if (!g_pCompositor || !g_pGlobalState->textures.ready) {
-    ImgLog::log("reload: textures not ready (failed=%d)",
-                g_pGlobalState->textures.failed ? 1 : 0);
+  if (!g_pCompositor || !g_pGlobalState->textures.ready)
     return;
-  }
 
   if (!g_pEventLoopManager)
     return;
-  ImgLog::stage("reload.applyLater");
   g_pEventLoopManager->doLater([]() {
-    ImgLog::stage("reload.apply");
-    if (!g_pCompositor || !g_pGlobalState)
+    auto *compositor = hyprframesCompositor();
+    if (!compositor || !g_pGlobalState)
       return;
-    int n = 0;
     try {
-      for (auto &w : g_pCompositor->m_windows) {
+      for (auto &w : compositor->m_windows) {
         if (!w || !w->m_isMapped || w->isHidden())
           continue;
         for (auto &d : w->m_windowDecorations) {
           if (!d || d->getDisplayName() != DISPLAY_NAME)
             continue;
           static_cast<CImgBorder *>(d.get())->applySettings();
-          n++;
         }
       }
-    } catch (const std::exception &e) {
-      ImgLog::log("ERROR reload.apply: %s", e.what());
     } catch (...) {
-      ImgLog::log("ERROR reload.apply unknown");
     }
-    ImgLog::log("reload applied to %d decorations", n);
-    ImgLog::stage("idle");
   });
 }
